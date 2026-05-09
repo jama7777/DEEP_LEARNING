@@ -138,7 +138,7 @@ def slm_experiment_lab(epochs=500, lr=0.01, batch_size=4, use_adam=True, use_shu
 if __name__ == "__main__":
     # CHANGE THESE PARAMETERS TO EXPERIMENT!
     slm_experiment_lab(
-        epochs=100001, 
+        epochs=10001, 
         lr= 0.01, 
         batch_size=10, 
         use_adam=True, 
