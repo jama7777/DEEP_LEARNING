@@ -1,13 +1,15 @@
 import numpy as np
 import os
+import re
 from nature_slm_master import Nature_SLM_Pro, get_data
 
 def generate_text(model, w2i, i2w, prompt, max_gen=20, context_size=5, temperature=1.0):
     """
     Performs inference to generate text based on a prompt.
     """
-    # 1. Tokenize prompt
-    words = prompt.lower().split()
+    # 1. Clean and Tokenize prompt (Must match training sanitation)
+    clean_prompt = re.sub(r'[^a-z\s]', ' ', prompt.lower())
+    words = clean_prompt.split()
     input_ids = [w2i[w] for w in words if w in w2i]
     
     if not input_ids:

@@ -129,6 +129,12 @@ class Nature_SLM_Pro:
     def load(self, path):
         if os.path.exists(path):
             data = np.load(path)
+            # Shape Safety Check
+            if data['E'].shape[0] != self.vocab_size:
+                print(f"⚠️ Warning: Checkpoint vocab size ({data['E'].shape[0]}) does not match current vocab size ({self.vocab_size}).")
+                print("   Skipping load to prevent crashes. Training from scratch.")
+                return False
+                
             self.E = data['E']
             self.W1 = data['W1']
             self.b1 = data['b1']
@@ -143,17 +149,31 @@ class Nature_SLM_Pro:
             return True
         return False
 
+import re
+from collections import Counter
+
 def get_data():
     path = "/Users/indra/Desktop/DEEP_LEARNING/04_Neural_Framework/Architectures/nature_corpus.txt"
     with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
+        text = f.read().lower()
     
-    # Simple tokenization
-    words = text.lower().split()
+    # 1. VERBAL SANITATION (Regex Cleaning)
+    # Remove everything except letters and spaces
+    text = re.sub(r'[^a-z\s]', ' ', text)
+    
+    # 2. TOKENIZATION
+    words = text.split()
+    
+    # 3. FREQUENCY FILTERING (Optional but high-impact)
+    # Removing "hapax legomena" (words appearing once) to cut noise
+    counts = Counter(words)
+    words = [w for w in words if counts[w] > 1]
+    
     vocab = sorted(list(set(words)))
     word_to_id = {w: i for i, w in enumerate(vocab)}
     id_to_word = {i: w for i, w in enumerate(vocab)}
     
+    print(f"🧹 Sanitation Complete: Vocab reduced from ~29k to {len(vocab)}")
     return [word_to_id[w] for w in words], vocab, word_to_id, id_to_word
 
 def train_nature_slm():
@@ -172,29 +192,28 @@ def train_nature_slm():
     checkpoint_path = "/Users/indra/Desktop/DEEP_LEARNING/04_Neural_Framework/Architectures/nature_slm_checkpoint.npz"
     model.load(checkpoint_path)
     
-    # 3. PREPARE WINDOWS
-    X = []
-    Y = []
-    for i in range(len(data_ids) - context_size):
-        X.append(data_ids[i:i+context_size])
-        Y.append(data_ids[i+context_size])
-    
-    X = np.array(X)
-    Y = np.array(Y)
+    # 3. PREPARE WINDOWS (Memory Efficient Slicing)
+    num_samples = len(data_ids) - context_size
+    # We use a trick to avoid giant list appending:
+    data_np = np.array(data_ids)
     
     # 4. TRAINING LOOP
     epochs = 100
     for epoch in range(epochs):
-        indices = np.arange(len(X))
+        # Shuffle indices at the start of each epoch
+        indices = np.arange(num_samples)
         np.random.shuffle(indices)
         
         epoch_loss = 0
         start_time = time.time()
         
-        for i in range(0, len(X), batch_size):
-            batch_idx = indices[i:i+batch_size]
-            b_x = X[batch_idx]
-            b_y = Y[batch_idx]
+        for i in range(0, num_samples, batch_size):
+            batch_indices = indices[i:i+batch_size]
+            
+            # Efficiently build the batch
+            # b_x shape: (batch_size, context_size)
+            b_x = np.array([data_np[idx : idx + context_size] for idx in batch_indices])
+            b_y = data_np[batch_indices + context_size]
             
             probs = model.forward(b_x)
             loss = -np.mean(np.log(probs[np.arange(len(b_y)), b_y] + 1e-15))
@@ -203,20 +222,24 @@ def train_nature_slm():
             model.backward(b_x, b_y)
             model.update(b_x, lr)
             
-            if i % (batch_size * 100) == 0:
-                print(f"Batch {i}/{len(X)} | Current Loss: {loss:.4f}")
+            if i % (batch_size * 500) == 0:
+                print(f"Batch {i}/{num_samples} | Current Loss: {loss:.4f}")
 
         # Save checkpoint after each epoch
-        avg_loss = epoch_loss / (len(X) / batch_size)
+        num_batches = num_samples // batch_size
+        avg_loss = epoch_loss / num_batches
         print(f"✅ Epoch {epoch} Complete | Avg Loss: {avg_loss:.4f} | Time: {time.time() - start_time:.2f}s")
         model.save(checkpoint_path)
         
-        # Quick Sample
-        test_context = X[0:1] # Take the first window
+        # Quick Sample (Predict from a random point)
+        sample_idx = np.random.randint(0, num_samples)
+        test_context = data_np[sample_idx : sample_idx + context_size].reshape(1, -1)
         probs = model.forward(test_context)
         pred = np.argmax(probs)
-        print(f"   Input: {' '.join([i2w[idx] for idx in test_context[0]])}")
-        print(f"   Predicted Next: {i2w[pred]} (Actual: {i2w[Y[0]]})")
+        actual = data_np[sample_idx + context_size]
+        
+        print(f"   Sample Input: {' '.join([i2w[idx] for idx in test_context[0]])}")
+        print(f"   Predicted: {i2w[pred]} | Actual: {i2w[actual]}")
         print("-" * 60)
 
 if __name__ == "__main__":
