@@ -48,7 +48,8 @@ class Nature_SLM_Pro:
         # 3. Layer Normalization
         mu = np.mean(self.z1, axis=1, keepdims=True)
         var = np.var(self.z1, axis=1, keepdims=True)
-        self.z1_norm = (self.z1 - mu) / np.sqrt(var + 1e-8)
+        self.std = np.sqrt(var + 1e-8)
+        self.z1_norm = (self.z1 - mu) / self.std
         self.z1_ln = self.gamma * self.z1_norm + self.beta
         
         # 4. Activation (ReLU)
@@ -82,9 +83,10 @@ class Nature_SLM_Pro:
         dbeta = np.sum(da1, axis=0, keepdims=True)
         dgamma = np.sum(da1 * self.z1_norm, axis=0, keepdims=True)
         
-        # Back through LN math (simplified LN grad)
+        # Back through LN math
         dz1_norm = da1 * self.gamma
-        dz1 = (1.0/self.hidden_dim) * (self.hidden_dim * dz1_norm - np.sum(dz1_norm, axis=1, keepdims=True) - self.z1_norm * np.sum(dz1_norm * self.z1_norm, axis=1, keepdims=True))
+        # Corrected LN grad: (dz1_norm - mean(dz1_norm) - znorm * mean(dz1_norm * znorm)) / std
+        dz1 = (dz1_norm - np.mean(dz1_norm, axis=1, keepdims=True) - self.z1_norm * np.mean(dz1_norm * self.z1_norm, axis=1, keepdims=True)) / self.std
         
         # 5. Back to W1, b1
         dW1 = np.dot(self.x_flat.T, dz1)
@@ -103,6 +105,14 @@ class Nature_SLM_Pro:
         self.t += 1
         beta1, beta2, eps = 0.9, 0.999, 1e-8
         
+        # 0. Global Gradient Clipping (Prevents divergence after first epoch)
+        total_norm = np.sqrt(sum(np.sum(g**2) for g in self.grads[1:]) + np.sum(self.dembs**2))
+        clip_coef = 5.0 / (total_norm + 1e-6)
+        if clip_coef < 1:
+            for i in range(1, len(self.params)):
+                self.grads[i] *= clip_coef
+            self.dembs *= clip_coef
+
         # 1. Update dense params
         for i in range(1, len(self.params)):
             grad = self.grads[i]
@@ -145,15 +155,21 @@ class Nature_SLM_Pro:
     def load(self, path):
         if not os.path.exists(path):
             return False
+        print(f"🔍 Attempting to load checkpoint: {path}")
         try:
-            # Use allow_pickle=True for robustness with scalars
-            with np.load(path, allow_pickle=True) as data:
-                # Shape Safety Check
-                if 'E' in data and data['E'].shape[0] != self.vocab_size:
-                    print(f"⚠️ Warning: Checkpoint vocab ({data['E'].shape[0]}) mismatch model ({self.vocab_size}). Skipping.")
+            # Use mmap_mode to prevent MemoryErrors on large files
+            with np.load(path, allow_pickle=True, mmap_mode='r') as data:
+                # Keys check
+                required = ['E', 'W1', 'b1', 'gamma', 'beta', 'W2', 'b2', 't']
+                if not all(k in data for k in required):
+                    print("⚠️ Invalid checkpoint format. Skipping.")
+                    return False
+                    
+                if data['E'].shape[0] != self.vocab_size:
+                    print(f"⚠️ Vocab mismatch: {data['E'].shape[0]} vs {self.vocab_size}. Skipping.")
                     return False
                 
-                # Load weights (using .copy() to ensure data isn't lazily linked to the file)
+                # Load weights
                 self.E = data['E'].copy()
                 self.W1 = data['W1'].copy()
                 self.b1 = data['b1'].copy()
@@ -163,19 +179,22 @@ class Nature_SLM_Pro:
                 self.b2 = data['b2'].copy()
                 self.t = int(data['t'])
                 
-                # Load Adam states if they exist in the checkpoint
+                # Load Adam states
                 if 'm_0' in data:
                     self.ms = [data[f'm_{i}'].copy() for i in range(len(self.params))]
                     self.vs = [data[f'v_{i}'].copy() for i in range(len(self.params))]
-                    print("🧠 Adam momentum states restored.")
+                    print("🧠 Adam states restored.")
                 
-                # Re-sync params list to point to newly loaded arrays
                 self.params = [self.E, self.W1, self.b1, self.gamma, self.beta, self.W2, self.b2]
-                print(f"📂 Checkpoint loaded from {path} (Timestep: {self.t})")
+                print(f"📂 Loaded successfully (Timestep: {self.t})")
                 return True
         except Exception as e:
-            print(f"⚠️ Error loading checkpoint: {e}")
-            # If the file is corrupted (often cause of the 4 errors), we might want to notify
+            print(f"💥 Checkpoint Corrupted or Incompatible: {e}")
+            try:
+                os.remove(path)
+                print("🗑️ Deleted corrupted checkpoint to allow fresh training.")
+            except:
+                pass
             return False
 
 import re
@@ -246,6 +265,11 @@ def train_nature_slm():
             
             probs = model.forward(b_x)
             loss = -np.mean(np.log(probs[np.arange(len(b_y)), b_y] + 1e-15))
+            
+            if np.isnan(loss):
+                print("💥 DIVERGENCE DETECTED (NaN Loss). Stopping training.")
+                return
+                
             epoch_loss += loss
             
             model.backward(b_x, b_y)
