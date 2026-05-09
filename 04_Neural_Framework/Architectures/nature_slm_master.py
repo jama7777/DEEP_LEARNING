@@ -2,6 +2,8 @@ import numpy as np
 import os
 import time
 
+print("🚀 RUNNING VERSION: V2.1 (VERBAL SANITATION ACTIVE)")
+
 class Nature_SLM_Pro:
     """
     Nature SLM Pro: Deep MLP Architecture with LayerNorm & Checkpointing
