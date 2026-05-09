@@ -103,7 +103,7 @@ class Nature_SLM_Pro:
         self.t += 1
         beta1, beta2, eps = 0.9, 0.999, 1e-8
         
-        # Update dense params
+        # 1. Update dense params
         for i in range(1, len(self.params)):
             grad = self.grads[i]
             self.ms[i] = beta1 * self.ms[i] + (1 - beta1) * grad
@@ -112,44 +112,71 @@ class Nature_SLM_Pro:
             v_hat = self.vs[i] / (1 - beta2**self.t)
             self.params[i] -= lr * m_hat / (np.sqrt(v_hat) + eps)
         
-        # Update Embeddings (Sparse)
-        # Note: We aggregate gradients for the same index in the batch
-        for b in range(x_ids.shape[0]):
-            for c in range(self.context_size):
-                idx = x_ids[b, c]
-                g = self.dembs[b, c]
-                self.ms[0][idx] = beta1 * self.ms[0][idx] + (1 - beta1) * g
-                self.vs[0][idx] = beta2 * self.vs[0][idx] + (1 - beta2) * (g**2)
-                m_h = self.ms[0][idx] / (1 - beta1**self.t)
-                v_h = self.vs[0][idx] / (1 - beta2**self.t)
-                self.E[idx] -= lr * m_h / (np.sqrt(v_h) + eps)
+        # 2. Update Embeddings (Sparse)
+        # Aggregate gradients for unique indices to ensure correct Adam momentum update
+        unique_ids = np.unique(x_ids)
+        for idx in unique_ids:
+            # Find all positions where this word appeared in the batch
+            mask = (x_ids == idx)
+            # Average gradient for this word in this batch
+            g = np.mean(self.dembs[mask], axis=0)
+            
+            self.ms[0][idx] = beta1 * self.ms[0][idx] + (1 - beta1) * g
+            self.vs[0][idx] = beta2 * self.vs[0][idx] + (1 - beta2) * (g**2)
+            m_h = self.ms[0][idx] / (1 - beta1**self.t)
+            v_h = self.vs[0][idx] / (1 - beta2**self.t)
+            self.E[idx] -= lr * m_h / (np.sqrt(v_h) + eps)
 
     def save(self, path):
-        np.savez(path, E=self.E, W1=self.W1, b1=self.b1, gamma=self.gamma, beta=self.beta, W2=self.W2, b2=self.b2, t=self.t)
-        print(f"💾 Checkpoint saved to {path}")
+        # Prepare dictionary with all parameters and Adam states
+        save_dict = {
+            'E': self.E, 'W1': self.W1, 'b1': self.b1, 
+            'gamma': self.gamma, 'beta': self.beta, 
+            'W2': self.W2, 'b2': self.b2, 't': self.t
+        }
+        # Add Adam momentum and velocity buffers
+        for i, (m, v) in enumerate(zip(self.ms, self.vs)):
+            save_dict[f'm_{i}'] = m
+            save_dict[f'v_{i}'] = v
+            
+        np.savez(path, **save_dict)
+        print(f"💾 Checkpoint saved to {path} (Timestep: {self.t})")
 
     def load(self, path):
-        if os.path.exists(path):
-            data = np.load(path)
-            # Shape Safety Check
-            if data['E'].shape[0] != self.vocab_size:
-                print(f"⚠️ Warning: Checkpoint vocab size ({data['E'].shape[0]}) does not match current vocab size ({self.vocab_size}).")
-                print("   Skipping load to prevent crashes. Training from scratch.")
-                return False
+        if not os.path.exists(path):
+            return False
+        try:
+            # Use allow_pickle=True for robustness with scalars
+            with np.load(path, allow_pickle=True) as data:
+                # Shape Safety Check
+                if 'E' in data and data['E'].shape[0] != self.vocab_size:
+                    print(f"⚠️ Warning: Checkpoint vocab ({data['E'].shape[0]}) mismatch model ({self.vocab_size}). Skipping.")
+                    return False
                 
-            self.E = data['E']
-            self.W1 = data['W1']
-            self.b1 = data['b1']
-            self.gamma = data['gamma']
-            self.beta = data['beta']
-            self.W2 = data['W2']
-            self.b2 = data['b2']
-            self.t = int(data['t'])
-            # Reset params list to point to new arrays
-            self.params = [self.E, self.W1, self.b1, self.gamma, self.beta, self.W2, self.b2]
-            print(f"📂 Checkpoint loaded from {path} (Timestep: {self.t})")
-            return True
-        return False
+                # Load weights (using .copy() to ensure data isn't lazily linked to the file)
+                self.E = data['E'].copy()
+                self.W1 = data['W1'].copy()
+                self.b1 = data['b1'].copy()
+                self.gamma = data['gamma'].copy()
+                self.beta = data['beta'].copy()
+                self.W2 = data['W2'].copy()
+                self.b2 = data['b2'].copy()
+                self.t = int(data['t'])
+                
+                # Load Adam states if they exist in the checkpoint
+                if 'm_0' in data:
+                    self.ms = [data[f'm_{i}'].copy() for i in range(len(self.params))]
+                    self.vs = [data[f'v_{i}'].copy() for i in range(len(self.params))]
+                    print("🧠 Adam momentum states restored.")
+                
+                # Re-sync params list to point to newly loaded arrays
+                self.params = [self.E, self.W1, self.b1, self.gamma, self.beta, self.W2, self.b2]
+                print(f"📂 Checkpoint loaded from {path} (Timestep: {self.t})")
+                return True
+        except Exception as e:
+            print(f"⚠️ Error loading checkpoint: {e}")
+            # If the file is corrupted (often cause of the 4 errors), we might want to notify
+            return False
 
 import re
 from collections import Counter
