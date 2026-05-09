@@ -231,15 +231,30 @@ def train_nature_slm():
         print(f"✅ Epoch {epoch} Complete | Avg Loss: {avg_loss:.4f} | Time: {time.time() - start_time:.2f}s")
         model.save(checkpoint_path)
         
-        # Quick Sample (Predict from a random point)
+        # 5. LIVE GENERATION SAMPLE (See how the model is "thinking")
         sample_idx = np.random.randint(0, num_samples)
-        test_context = data_np[sample_idx : sample_idx + context_size].reshape(1, -1)
-        probs = model.forward(test_context)
-        pred = np.argmax(probs)
-        actual = data_np[sample_idx + context_size]
+        context_ids = list(data_np[sample_idx : sample_idx + context_size])
+        original_context = " ".join([i2w[idx] for idx in context_ids])
         
-        print(f"   Sample Input: {' '.join([i2w[idx] for idx in test_context[0]])}")
-        print(f"   Predicted: {i2w[pred]} | Actual: {i2w[actual]}")
+        generated = []
+        temp_ids = context_ids[:]
+        
+        for _ in range(20):
+            window = np.array([temp_ids[-context_size:]])
+            probs = model.forward(window)[0]
+            
+            # Sampling with Temperature (0.7 for balance)
+            probs = np.log(probs + 1e-15) / 0.7
+            exp_probs = np.exp(probs - np.max(probs))
+            probs = exp_probs / np.sum(exp_probs)
+            next_id = np.random.choice(len(probs), p=probs)
+            
+            generated.append(i2w[next_id])
+            temp_ids.append(next_id)
+            
+        print(f"🔮 EPOCH {epoch} GENERATION SAMPLE:")
+        print(f"   Prompt: \"{original_context}\"")
+        print(f"   Result: \033[92m{' '.join(generated)}\033[0m")
         print("-" * 60)
 
 if __name__ == "__main__":
